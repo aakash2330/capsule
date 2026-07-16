@@ -1,10 +1,10 @@
 #!/usr/bin/env bun
 // capsule — turn a Sentry issue into a locally runnable reproduction.
-// v0 scope: `capsule repro <sentry-issue-url>` fetches the latest event,
-// writes a capsule dir (evidence + replay script), makes sure the target
-// app is up (docker compose), and runs the repro.
+// Commands: create (evidence + isolated env), run (fire the trigger),
+// repro (create + run), init (author/verify the .capsule/ template),
+// apply (local tree → running stack), test (regression pack). See usage().
 
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { chmod, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { $ } from "bun";
@@ -62,10 +62,18 @@ function usage(): never {
   console.log(`capsule — reproduce a Sentry issue locally
 
 Usage:
-  capsule repro <sentry-issue-url>   reproduce a Sentry issue in an isolated stack
+  capsule create <sentry-issue-url>  fetch evidence + build & boot the isolated
+                                     reproduction environment (no replay)
+  capsule run <issue-id>             fire the captured trigger against the bug's
+                                     stack; exit 0 = bug reproduced
+  capsule repro <sentry-issue-url>   create + run in one shot
   capsule init [dir] [--force]       author (via Claude Code) + machine-verify a
                                      .capsule/ environment template for a repo;
                                      with an existing template, verifies it
+  capsule apply <issue-id>           rebuild the app image from your local tree and
+                                     swap it into the bug's running stack (state kept)
+  capsule test [issue-id]            replay every capsule's trigger against a running
+                                     stack (the regression pack); non-zero exit on failures
 
 Env:
   SENTRY_AUTH_TOKEN  required — Sentry → Settings → Auth Tokens (scopes: event:read, org:read)
@@ -225,7 +233,7 @@ function renderContext(ev: Evidence): string {
   const requestSection = ev.request
     ? `\`${ev.request.method} ${ev.request.path}\`${ev.request.body != null ? " with the body in [request-body.json](request-body.json)" : ""}`
     : "_no request captured on the event — context-only capsule_";
-  return `# bug-${ev.issueId}
+  return `# Sentry issue ${ev.issueId}
 
 **${ev.title ?? `${ev.exception.type}: ${ev.exception.value}`}**
 
@@ -252,7 +260,7 @@ ${requestSection}
 }
 
 async function writeCapsule(ev: Evidence, target: string): Promise<string> {
-  const dir = path.resolve("capsules", `bug-${ev.issueId}`);
+  const dir = path.resolve("capsules", ev.issueId);
   await mkdir(dir, { recursive: true });
   await Bun.write(
     path.join(dir, "evidence.json"),
@@ -299,11 +307,12 @@ function freePort(): number {
   return port;
 }
 
-async function buildImage(appDir: string): Promise<string> {
+async function buildImage(appDir: string, tag?: string): Promise<string> {
   console.log("→ building app image via .capsule/build.sh");
-  const build = await $`bash ${path.join(appDir, ".capsule", "build.sh")}`
-    .cwd(appDir)
-    .nothrow();
+  const script = path.join(appDir, ".capsule", "build.sh");
+  const build = tag
+    ? await $`bash ${script} ${tag}`.cwd(appDir).nothrow()
+    : await $`bash ${script}`.cwd(appDir).nothrow();
   if (build.exitCode !== 0) {
     throw new Error(
       `build.sh failed (exit ${build.exitCode})\n${build.stderr.toString().slice(-2000)}`,
@@ -332,6 +341,30 @@ function composeFlags(
   return flags;
 }
 
+async function pollHealth(target: string, m: Manifest): Promise<boolean> {
+  const deadline = Date.now() + (m.run.ready_timeout ?? 60) * 1000;
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(`${target}${m.run.healthcheck}`, {
+        signal: AbortSignal.timeout(1500),
+      });
+      if (res.ok) return true;
+    } catch {}
+    await Bun.sleep(1000);
+  }
+  return false;
+}
+
+function readEnvFile(file: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!existsSync(file)) return out;
+  for (const line of readFileSync(file, "utf8").split("\n")) {
+    const m = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/);
+    if (m) out[m[1]] = m[2];
+  }
+  return out;
+}
+
 // Instantiate the .capsule/ template as an isolated stack: own compose
 // project, pinned image, own host port. Throws with logs on failure.
 async function instantiate(
@@ -356,23 +389,13 @@ async function instantiate(
   }
 
   const target = `http://localhost:${port}`;
-  const timeoutSec = m.run.ready_timeout ?? 60;
-  const deadline = Date.now() + timeoutSec * 1000;
-  while (Date.now() < deadline) {
-    try {
-      const res = await fetch(`${target}${m.run.healthcheck}`, {
-        signal: AbortSignal.timeout(1500),
-      });
-      if (res.ok) return target;
-    } catch {}
-    await Bun.sleep(1000);
-  }
+  if (await pollHealth(target, m)) return target;
   const logs = await $`docker compose ${flags} logs --tail 60`
     .cwd(appDir)
     .quiet()
     .nothrow();
   throw new Error(
-    `app not healthy at ${target}${m.run.healthcheck} within ${timeoutSec}s\n--- stack logs ---\n${logs.stdout.toString().slice(-3000)}`,
+    `app not healthy at ${target}${m.run.healthcheck} within ${m.run.ready_timeout ?? 60}s\n--- stack logs ---\n${logs.stdout.toString().slice(-3000)}`,
   );
 }
 
@@ -549,6 +572,141 @@ async function cmdInit(appDir: string, force: boolean): Promise<void> {
   );
 }
 
+// Apply the local working tree to a bug's running stack: rebuild the image
+// with a distinct tag, swap only the app service, leave state untouched.
+async function cmdApply(bugId: string): Promise<void> {
+  const dir = path.resolve("capsules", bugId);
+  const envFile = path.join(dir, ".env.capsule");
+  if (!existsSync(envFile)) {
+    fail(`no capsule stack config at ${envFile} — run capsule repro first`);
+  }
+  const m = await loadManifest(APP_DIR);
+  if (!m) fail(`no .capsule/ template in ${APP_DIR}`);
+  const port = Number(readEnvFile(envFile).CAPSULE_PORT);
+  if (!port) fail(`${envFile} has no CAPSULE_PORT`);
+  const project = `capsule-${bugId}`;
+
+  const ps = await $`docker compose ${composeFlags(APP_DIR, m, project, envFile)} ps -q`
+    .cwd(APP_DIR)
+    .quiet()
+    .nothrow();
+  if (!ps.stdout.toString().trim()) {
+    fail(`stack ${project} is not running — run capsule repro first`);
+  }
+
+  // Distinct tag per apply, so the test verdict pins to an exact image.
+  const stamp = new Date().toISOString().replace(/\D/g, "").slice(0, 14);
+  let image: string;
+  try {
+    image = await buildImage(APP_DIR, `fix-${stamp}`);
+  } catch (e) {
+    fail(e instanceof Error ? e.message : String(e));
+  }
+  await Bun.write(envFile, `CAPSULE_IMAGE=${image}\nCAPSULE_PORT=${port}\n`);
+
+  const service = m.run.service ?? "app";
+  console.log(`→ swapping ${service} in ${project} to ${image} (state untouched)`);
+  const up = await $`docker compose ${composeFlags(APP_DIR, m, project, envFile)} up -d --no-deps ${service}`
+    .cwd(APP_DIR)
+    .nothrow();
+  if (up.exitCode !== 0) fail(`docker compose up failed (exit ${up.exitCode})`);
+
+  const target = `http://localhost:${port}`;
+  if (!(await pollHealth(target, m))) {
+    fail(
+      `app not healthy at ${target}${m.run.healthcheck} after apply — check: docker compose -p ${project} logs app`,
+    );
+  }
+  console.log(`✓ applied — ${target} now runs ${image} (state preserved)`);
+  console.log(`  next: capsule test ${bugId}`);
+}
+
+// Replay every capsule's trigger against a running stack. The capsules
+// directory is the regression suite: exit 0 = every past bug stays absent.
+async function cmdTest(bugId?: string): Promise<void> {
+  const capsRoot = path.resolve("capsules");
+  const dirs = existsSync(capsRoot)
+    ? readdirSync(capsRoot)
+        .filter(
+          (d) =>
+            !d.startsWith(".") &&
+            existsSync(path.join(capsRoot, d, "repro.sh")),
+        )
+        .sort()
+    : [];
+  if (dirs.length === 0) {
+    fail("no capsules with a repro.sh under ./capsules — run capsule repro first");
+  }
+
+  const m = await loadManifest(APP_DIR);
+  const healthPath = m?.run.healthcheck ?? "/health";
+
+  // Target: explicit TARGET_URL, else the given bug's stack, else the first
+  // capsule stack that answers its healthcheck.
+  let target = process.env.TARGET_URL ?? "";
+  if (!target) {
+    for (const d of bugId ? [bugId] : dirs) {
+      const env = readEnvFile(path.join(capsRoot, d, ".env.capsule"));
+      if (!env.CAPSULE_PORT) continue;
+      const candidate = `http://localhost:${env.CAPSULE_PORT}`;
+      try {
+        const res = await fetch(`${candidate}${healthPath}`, {
+          signal: AbortSignal.timeout(1500),
+        });
+        if (res.ok) {
+          target = candidate;
+          break;
+        }
+      } catch {}
+    }
+  }
+  if (!target) {
+    fail(
+      `no running capsule stack found${bugId ? ` for ${bugId}` : ""} — run capsule repro (or apply) first, or set TARGET_URL`,
+    );
+  }
+
+  console.log(`→ replaying ${dirs.length} capsule trigger(s) against ${target}\n`);
+  let failed = 0;
+  for (const d of dirs) {
+    let title = d;
+    let reqLabel = "";
+    let issueUrl = "";
+    try {
+      const evj = JSON.parse(
+        readFileSync(path.join(capsRoot, d, "evidence.json"), "utf8"),
+      );
+      title = evj.title ?? `${evj.exception?.type}: ${evj.exception?.value}`;
+      issueUrl = evj.issueUrl ?? "";
+      if (evj.request) {
+        const body = evj.request.body ? ` ${evj.request.body.slice(0, 40)}` : "";
+        reqLabel = ` (${evj.request.method} ${evj.request.path}${body})`;
+      }
+    } catch {}
+    const r = await $`bash ${path.join(capsRoot, d, "repro.sh")}`
+      .env({ ...process.env, TARGET_URL: target } as Record<string, string>)
+      .quiet()
+      .nothrow();
+    const pass = r.exitCode === 0;
+    if (!pass) failed++;
+    console.log(`${pass ? "✓" : "✗"} ${d} — ${title}${reqLabel}`);
+    if (!pass) {
+      const tail = r.stdout
+        .toString()
+        .trim()
+        .split("\n")
+        .slice(-2)
+        .join("\n      ");
+      console.log(`      ${tail}`);
+      if (issueUrl) console.log(`      ${issueUrl}`);
+    }
+  }
+  console.log(
+    `\n${dirs.length - failed} passed, ${failed} failed — HTTP-level check only (fingerprint match arrives with the DSN sink)`,
+  );
+  if (failed > 0) process.exit(1);
+}
+
 const args = Bun.argv.slice(2);
 
 if (args[0] === "init") {
@@ -557,70 +715,133 @@ if (args[0] === "init") {
   process.exit(0);
 }
 
-if (args[0] !== "repro" || !args[1]) usage();
-const issueUrl = args[1];
-
-const { org, issueId } = parseIssueUrl(issueUrl);
-console.log(`→ fetching latest event for issue ${issueId} (org: ${org})`);
-const event = await fetchLatestEvent(org, issueId);
-const ev = extractEvidence(event, issueUrl, issueId);
-const top = ev.exception.topFrames[0];
-console.log(
-  `→ ${ev.exception.type}: ${ev.exception.value}${top ? ` — at ${top.filename}:${top.line}` : ""}`,
-);
-
-// With a .capsule/ template, each bug gets its own isolated stack on its own
-// port. Setting TARGET_URL explicitly skips that and replays against it.
-const manifest = process.env.TARGET_URL ? null : await loadManifest(APP_DIR);
-const project = manifest ? `capsule-bug-${issueId}` : null;
-const port = manifest ? freePort() : 0;
-const target = manifest ? `http://localhost:${port}` : TARGET_URL;
-
-const dir = await writeCapsule(ev, target);
-console.log(`→ wrote ${path.relative(process.cwd(), dir)}/`);
-
-if (!ev.request) {
-  console.log(
-    "⚠ event has no captured request — capsule is context-only (evidence + narrative).",
-  );
-  console.log(
-    "  Enable request capture in the app (sendDefaultPii / body capture) for replayable events.",
-  );
+if (args[0] === "apply") {
+  if (!args[1]) usage();
+  await cmdApply(args[1]);
   process.exit(0);
 }
 
-if (manifest && project) {
-  await upCapsuleStack(manifest, project, port, dir);
-} else {
-  await ensureAppUp();
+if (args[0] === "test") {
+  await cmdTest(args[1]);
+  process.exit(0);
 }
 
-console.log("→ replaying the captured request via repro.sh\n");
-const repro = await $`bash ${path.join(dir, "repro.sh")}`
-  .env({ ...process.env, TARGET_URL: target } as Record<string, string>)
-  .nothrow();
+// Create the reproduction environment: evidence → capsule dir → isolated
+// stack, booted and healthy. Does NOT fire the trigger.
+async function cmdCreate(issueUrl: string): Promise<{
+  bugId: string;
+  target: string;
+  hasRequest: boolean;
+}> {
+  const { org, issueId } = parseIssueUrl(issueUrl);
+  console.log(`→ fetching latest event for issue ${issueId} (org: ${org})`);
+  const event = await fetchLatestEvent(org, issueId);
+  const ev = extractEvidence(event, issueUrl, issueId);
+  const top = ev.exception.topFrames[0];
+  console.log(
+    `→ ${ev.exception.type}: ${ev.exception.value}${top ? ` — at ${top.filename}:${top.line}` : ""}`,
+  );
 
-if (repro.exitCode !== 0) {
-  console.log(
-    "\n✓ bug reproduced — repro.sh exits non-zero while the bug is present.",
-  );
-  console.log(
-    "  If the app has your real SENTRY_DSN, the replay just added a new event to the same Sentry issue.",
-  );
-} else {
-  console.log(
-    "\n✗ not reproduced — the replayed request did not produce a server error.",
-  );
-}
+  // With a .capsule/ template, each bug gets its own isolated stack on its own
+  // port. Setting TARGET_URL explicitly skips that and replays against it.
+  const manifest = process.env.TARGET_URL ? null : await loadManifest(APP_DIR);
+  const project = manifest ? `capsule-${issueId}` : null;
+  const port = manifest ? freePort() : 0;
+  const target = manifest ? `http://localhost:${port}` : TARGET_URL;
 
-if (project) {
-  console.log(`
+  const dir = await writeCapsule(ev, target);
+  console.log(`→ wrote ${path.relative(process.cwd(), dir)}/`);
+
+  if (!ev.request) {
+    console.log(
+      "⚠ event has no captured request — capsule is context-only (evidence + narrative).",
+    );
+    console.log(
+      "  Enable request capture in the app (sendDefaultPii / body capture) for replayable events.",
+    );
+    return { bugId: issueId, target, hasRequest: false };
+  }
+
+  if (manifest && project) {
+    await upCapsuleStack(manifest, project, port, dir);
+  } else {
+    await ensureAppUp();
+  }
+
+  if (project) {
+    console.log(`
 capsule stack (isolated from your dev stack):
   app URL:   ${target}
   shell in:  docker compose -p ${project} exec app bash
   logs:      docker compose -p ${project} logs -f app
   tear down: docker compose -p ${project} down
-  re-verify after a fix: capsule repro ${issueUrl}  (rebuilds the image from your tree)`);
+  run the repro:         capsule run ${issueId}
+  after fixing locally:  capsule apply ${issueId} && capsule test ${issueId}`);
+  }
+  return { bugId: issueId, target, hasRequest: true };
 }
 
-if (repro.exitCode === 0) process.exit(1);
+// Fire a capsule's captured trigger against its stack. Exit 0 = reproduced.
+async function cmdRun(bugId: string, targetOverride?: string): Promise<void> {
+  const dir = path.resolve("capsules", bugId);
+  const reproSh = path.join(dir, "repro.sh");
+  if (!existsSync(reproSh)) {
+    fail(
+      `no repro.sh in ${dir} — run capsule create <issue-url> first (or the capsule is context-only)`,
+    );
+  }
+
+  let target = targetOverride ?? process.env.TARGET_URL ?? "";
+  if (!target) {
+    const env = readEnvFile(path.join(dir, ".env.capsule"));
+    if (env.CAPSULE_PORT) target = `http://localhost:${env.CAPSULE_PORT}`;
+  }
+  if (!target) {
+    fail(
+      `no stack recorded for capsule ${bugId} — run capsule create first, or set TARGET_URL`,
+    );
+  }
+
+  try {
+    await fetch(target, { signal: AbortSignal.timeout(1500) });
+  } catch {
+    fail(
+      `nothing responding at ${target} — restart the stack with: docker compose -p capsule-${bugId} up -d  (or re-run capsule create)`,
+    );
+  }
+
+  console.log("→ replaying the captured request via repro.sh\n");
+  const repro = await $`bash ${reproSh}`
+    .env({ ...process.env, TARGET_URL: target } as Record<string, string>)
+    .nothrow();
+
+  if (repro.exitCode !== 0) {
+    console.log(
+      "\n✓ bug reproduced — repro.sh exits non-zero while the bug is present.",
+    );
+    console.log(
+      "  If the app has your real SENTRY_DSN, the replay just added a new event to the same Sentry issue.",
+    );
+  } else {
+    console.log(
+      "\n✗ not reproduced — the replayed request did not produce a server error.",
+    );
+    process.exit(1);
+  }
+}
+
+if (args[0] === "create") {
+  if (!args[1]) usage();
+  await cmdCreate(args[1]);
+  process.exit(0);
+}
+
+if (args[0] === "run") {
+  if (!args[1]) usage();
+  await cmdRun(args[1]);
+  process.exit(0);
+}
+
+if (args[0] !== "repro" || !args[1]) usage();
+const created = await cmdCreate(args[1]);
+if (created.hasRequest) await cmdRun(created.bugId, created.target);

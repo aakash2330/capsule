@@ -1,5 +1,5 @@
 # Compose overlay owned by capsule. Instantiated per bug as:
-#   docker compose -p capsule-bug-<id> -f compose.yaml -f .capsule/overlay.yaml up -d
+#   docker compose -p capsule-<id> -f compose.yaml -f .capsule/overlay.yaml up -d
 # Only capsule-specific changes live here; services/deps inherit from compose.yaml.
 services:
   app:

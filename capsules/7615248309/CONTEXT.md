@@ -1,9 +1,9 @@
-# bug-7615248309
+# Sentry issue 7615248309
 
 **TypeError: null is not an object (evaluating 'user.preferences.theme')**
 
 - Issue: https://aakash-2h.sentry.io/issues/7615248309/?project=4511739550236672&query=is%3Aunresolved&referrer=issue-stream
-- Event: 7bce83a5ca37435eb83f32a6dc0d4d45 (2026-07-16T16:18:18.616000Z)
+- Event: 57358c45051b4438a73e399ff995cffd (2026-07-16T19:33:13.809000Z)
 - Exception: `TypeError: null is not an object (evaluating 'user.preferences.theme')`
 
 Top in-app frames (innermost first):

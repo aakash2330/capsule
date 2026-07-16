@@ -1,10 +1,10 @@
 {
   "issueId": "7615248309",
   "issueUrl": "https://aakash-2h.sentry.io/issues/7615248309/?project=4511739550236672&query=is%3Aunresolved&referrer=issue-stream",
-  "eventId": "7bce83a5ca37435eb83f32a6dc0d4d45",
+  "eventId": "57358c45051b4438a73e399ff995cffd",
   "title": "TypeError: null is not an object (evaluating 'user.preferences.theme')",
-  "dateCreated": "2026-07-16T16:18:18.616000Z",
-  "fetchedAt": "2026-07-16T18:14:11.231Z",
+  "dateCreated": "2026-07-16T19:33:13.809000Z",
+  "fetchedAt": "2026-07-16T19:46:41.565Z",
   "exception": {
     "type": "TypeError",
     "value": "null is not an object (evaluating 'user.preferences.theme')",
@@ -18,7 +18,7 @@
   },
   "request": {
     "method": "POST",
-    "url": "http://localhost:53219/signup",
+    "url": "http://localhost:58320/signup",
     "path": "/signup",
     "contentType": "application/json",
     "body": "{\"email\":\"ada@example.com\"}"

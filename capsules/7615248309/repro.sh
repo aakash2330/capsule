@@ -3,7 +3,7 @@
 # Contract: exits non-zero while the bug is present.
 set -u
 DIR="$(cd "$(dirname "$0")" && pwd)"
-TARGET="${TARGET_URL:-http://localhost:55766}"
+TARGET="${TARGET_URL:-http://localhost:60407}"
 OUT="$(mktemp)"
 STATUS=$(curl -s -o "$OUT" -w '%{http_code}' -X POST "$TARGET/signup" -H 'content-type: application/json' --data-binary @"$DIR/request-body.json")
 echo "POST /signup -> HTTP $STATUS"
