@@ -1,12 +1,11 @@
-# Capsule environment template — authored once, instantiated per bug.
+# Capsule environment template — authored once by the capsule-init skill.
+# Compose runs the repo's own compose.yaml as-is (same ports: stop the dev stack first).
 capsule: 1
 app: demo-app
-build: compose                   # docker compose build app, using compose.yaml's own build: block
+build: compose                   # docker compose build app, via compose.yaml's own build: block
 run:
-  compose: compose.yaml          # base layer (the repo's own compose file)
+  compose: compose.yaml          # the repo's own compose file
   service: app
-  port: 3002                     # container port
   healthcheck: /health           # 2xx within ready_timeout = booted
   ready_timeout: 60
-env: {}
 state: {}

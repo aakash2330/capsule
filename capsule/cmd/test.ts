@@ -1,6 +1,6 @@
 // capsule test <id>   — judge the current directory against one capsule:
-//   build a candidate image from the capsule's OWN recipe snapshot, reset the
-//   world from seed.dump, replay the trigger, write a receipt. Exit code =
+//   build a candidate image from the current tree's own compose file, reset
+//   the world from seed.dump, replay the trigger, write a receipt. Exit code =
 //   verdict. The one command a fix workspace may run.
 // capsule test        — regression pack: replay every capsule's trigger
 //   against a running stack; exit 0 = every past bug stays absent.
@@ -10,17 +10,9 @@ import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { $ } from "bun";
 import { hasRecipe, readEvidence, recipeDir } from "../lib/record";
-import { CAPSULE_HOME, capsRoot, capsuleDir, currentAppDir } from "../lib/repo";
-import {
-  bootStack,
-  buildImage,
-  composeFlags,
-  freePort,
-  loadManifest,
-  readManifest,
-  writeStackEnv,
-} from "../lib/stack";
-import { fail, readEnvFile } from "../lib/util";
+import { capsRoot, capsuleDir, currentAppDir } from "../lib/repo";
+import { bootStack, buildImage, loadManifest, publishedPort, readManifest, stackFlags } from "../lib/stack";
+import { fail } from "../lib/util";
 
 export async function cmdVerify(bugId: string): Promise<void> {
   const dir = capsuleDir(bugId);
@@ -49,24 +41,17 @@ export async function cmdVerify(bugId: string): Promise<void> {
   console.log(`→ candidate: ${worktree} (${head}${dirty ? `+${diffHash}` : ""})`);
 
   try {
-    const image = `capsule/${m.app}:candidate-${stamp}`;
     const project = `capsule-${bugId}`;
-    const envFile = path.join(dir, ".env.capsule");
-    const port = Number(readEnvFile(envFile).CAPSULE_PORT) || freePort();
-    // The capsule's OWN recipe (compose snapshot + overlay) builds the caller's tree.
-    await writeStackEnv(envFile, image, port, worktree);
-    const flags = composeFlags(
-      project,
-      [path.join(rd, "compose.snapshot.yaml"), path.join(rd, "overlay.yaml")],
-      [envFile],
-    );
-    await buildImage(CAPSULE_HOME, flags, m);
+    const image = `${project}-${m.run.service}`; // compose's default image name
+    const flags = stackFlags(worktree, m, project);
+    await buildImage(worktree, flags, m);
+    const port = await publishedPort(worktree, flags, m);
 
     // Deterministic judging: tear the whole stack down (containers + volume)
     // and rebuild the world from the snapshot before every verdict.
     console.log(`→ resetting capsule world from seed.dump (project ${project})`);
-    await $`docker compose ${flags} down -v --remove-orphans`.cwd(CAPSULE_HOME).quiet().nothrow();
-    const target = await bootStack(CAPSULE_HOME, flags, m, project, port, path.join(dir, "seed.dump"));
+    await $`docker compose ${flags} down -v --remove-orphans`.cwd(worktree).quiet().nothrow();
+    const target = await bootStack(worktree, flags, m, project, port, path.join(dir, "seed.dump"));
 
     console.log("→ candidate healthy — replaying the captured trigger\n");
     // Pin TARGET_URL to this stack, and hard-bound the replay: a candidate that
@@ -128,8 +113,9 @@ CAPSULE VERDICT: ${pass ? "PASS — trigger replayed clean and the report agrees
 
 export async function cmdTest(): Promise<void> {
   const root = capsRoot();
-  const m = await loadManifest(currentAppDir());
-  const healthPath = m?.run.healthcheck ?? "/health";
+  const appDir = currentAppDir();
+  const m = await loadManifest(appDir);
+  if (!m) fail(`no .capsule/manifest.yaml in ${appDir} — run capsule test from inside the app repo`);
 
   // Scope the pack to THIS app: replaying another app's captured request
   // against this stack is meaningless.
@@ -141,20 +127,11 @@ export async function cmdTest(): Promise<void> {
   if (dirs.length === 0) fail("no capsules for this app — run capsule repro first");
   if (skipped) console.log(`→ ${skipped} capsule(s) for other apps skipped`);
 
-  // Target: the first capsule stack that answers its healthcheck.
-  let target = "";
-  for (const d of dirs) {
-    const port = readEnvFile(path.join(root, d, ".env.capsule")).CAPSULE_PORT;
-    if (!port) continue;
-    try {
-      const res = await fetch(`http://localhost:${port}${healthPath}`, { signal: AbortSignal.timeout(1500) });
-      if (res.ok) {
-        target = `http://localhost:${port}`;
-        break;
-      }
-    } catch {}
-  }
-  if (!target) fail("no running capsule stack found — run capsule repro first");
+  // Target: whatever is answering on the app's own port (a capsule stack or the dev stack).
+  const port = await publishedPort(appDir, stackFlags(appDir, m, "capsule"), m);
+  const target = `http://localhost:${port}`;
+  const up = await fetch(`${target}${m.run.healthcheck}`, { signal: AbortSignal.timeout(1500) }).then((r) => r.ok, () => false);
+  if (!up) fail(`nothing healthy at ${target}${m.run.healthcheck} — start a stack first (capsule repro, or docker compose up)`);
 
   console.log(`→ replaying ${dirs.length} capsule trigger(s) against ${target}\n`);
   let failed = 0;

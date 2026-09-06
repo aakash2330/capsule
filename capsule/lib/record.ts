@@ -1,12 +1,12 @@
 // The capsule record on disk: capsules/<id>/ with evidence.json, repro.sh,
-// request-body.json, seed.dump, .env.capsule and the .capsule-recipe snapshot.
+// request-body.json, seed.dump and the .capsule-recipe manifest snapshot.
 import { existsSync, readFileSync } from "node:fs";
 import { chmod, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { $ } from "bun";
 import { CAPSULE_HOME, capsuleDir } from "./repo";
 import type { Evidence } from "./sentry";
-import type { Manifest, ReproAuth } from "./stack";
+import type { ReproAuth } from "./stack";
 import { fail } from "./util";
 
 export function readEvidence(bugId: string): Evidence | null {
@@ -88,18 +88,14 @@ export async function writeCapsule(ev: Evidence, target: string, auth?: ReproAut
   return dir;
 }
 
-// Snapshot the app's .capsule/ template plus its compose file into the
-// capsule record at repro-time, so the judge never executes fix-workspace
-// authored compose/overlay files.
-export async function snapshotRecipe(appDir: string, m: Manifest, dir: string): Promise<void> {
+// Snapshot the app's .capsule/ manifest into the capsule record at repro-time,
+// so `capsule test` judges with the manifest the bug was captured under.
+export async function snapshotRecipe(appDir: string, dir: string): Promise<void> {
   const rd = recipeDir(dir);
   await mkdir(rd, { recursive: true });
   const cp = await $`cp -R ${path.join(appDir, ".capsule")}/. ${rd}/`.nothrow();
   if (cp.exitCode !== 0) throw new Error("failed to snapshot .capsule/ recipe");
-  const compose =
-    await $`cp ${path.join(appDir, m.run.compose)} ${path.join(rd, "compose.snapshot.yaml")}`.nothrow();
-  if (compose.exitCode !== 0) throw new Error(`failed to snapshot ${m.run.compose}`);
-  console.log(`→ snapshotted build recipe into ${path.relative(CAPSULE_HOME, rd)}/`);
+  console.log(`→ snapshotted manifest into ${path.relative(CAPSULE_HOME, rd)}/`);
 }
 export const recipeDir = (dir: string) => path.join(dir, ".capsule-recipe");
 export const hasRecipe = (dir: string) => existsSync(recipeDir(dir));

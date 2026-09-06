@@ -6,8 +6,8 @@ import { $ } from "bun";
 import { snapshotRecipe, writeCapsule } from "../lib/record";
 import { capsuleDir, currentAppDir, loadRepoSentryConfig, resolveAppDir } from "../lib/repo";
 import { extractEvidence, fetchLatestEvent, parseIssueUrl } from "../lib/sentry";
-import { dumpState, freePort, instantiate, loadManifest } from "../lib/stack";
-import { fail, readEnvFile } from "../lib/util";
+import { dumpState, instantiate, loadManifest, publishedPort, stackFlags } from "../lib/stack";
+import { fail } from "../lib/util";
 
 export async function cmdRepro(issueUrl: string): Promise<void> {
   if (!resolveAppDir()) fail("not inside an onboarded repo — cd into your app repo and run `capsule init`");
@@ -22,9 +22,10 @@ export async function cmdRepro(issueUrl: string): Promise<void> {
   const top = ev.exception.topFrames[0];
   console.log(`→ ${ev.exception.type}: ${ev.exception.value}${top ? ` — at ${top.filename}:${top.line}` : ""}`);
 
-  // Each bug gets its own isolated stack on its own port.
+  // Each bug gets its own compose project (own volumes); ports are the repo's
+  // own, so the dev stack must be down.
   const project = `capsule-${issueId}`;
-  const port = freePort();
+  const port = await publishedPort(appDir, stackFlags(appDir, manifest, project), manifest);
   const target = `http://localhost:${port}`;
   ev.app = manifest.app; // the regression pack replays only this app's capsules
   const dir = await writeCapsule(ev, target, manifest.repro?.auth);
@@ -35,7 +36,7 @@ export async function cmdRepro(issueUrl: string): Promise<void> {
   await dumpState(manifest, dir);
   // Snapshot the build recipe so `capsule test` judges candidates without
   // trusting anything outside the capsule record.
-  await snapshotRecipe(appDir, manifest, dir);
+  await snapshotRecipe(appDir, dir);
 
   if (!ev.request) {
     console.log("⚠ event has no captured request — capsule is evidence-only.");
@@ -44,7 +45,7 @@ export async function cmdRepro(issueUrl: string): Promise<void> {
   }
 
   try {
-    await instantiate(appDir, manifest, project, port, path.join(dir, ".env.capsule"));
+    await instantiate(appDir, manifest, project, path.join(dir, "seed.dump"));
   } catch (e) {
     fail(e instanceof Error ? e.message : String(e));
   }
@@ -62,13 +63,9 @@ capsule stack (isolated from your dev stack):
 // Fire a capsule's captured trigger against its running stack.
 async function replay(bugId: string): Promise<void> {
   const dir = capsuleDir(bugId);
-  const port = readEnvFile(path.join(dir, ".env.capsule")).CAPSULE_PORT;
-  if (!port) fail(`no stack recorded for capsule ${bugId}`);
-  const target = `http://localhost:${port}`;
   console.log("→ replaying the captured request via repro.sh\n");
-  const r = await $`bash ${path.join(dir, "repro.sh")}`
-    .env({ ...process.env, TARGET_URL: target } as Record<string, string>)
-    .nothrow();
+  // repro.sh carries its own TARGET_URL default (the app URL recorded at repro-time).
+  const r = await $`bash ${path.join(dir, "repro.sh")}`.nothrow();
   if (r.exitCode !== 0) {
     console.log("\n✓ bug reproduced — repro.sh exits non-zero while the bug is present.");
     console.log("  If the app has your real SENTRY_DSN, the replay just added an event to the same Sentry issue.");

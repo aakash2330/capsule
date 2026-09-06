@@ -4,8 +4,8 @@ POC: turn a Sentry incident into a locally runnable reproduction (see [PLAN.md](
 
 - [demo-app/](demo-app) — the target app: Express (on Bun) + Postgres via docker compose.
   `POST /signup` has a deliberate bug that reports to Sentry.
-- [demo-app/.capsule/](demo-app/.capsule) — the environment template (manifest +
-  compose overlay). Authored once per repo by the
+- [demo-app/.capsule/](demo-app/.capsule) — the environment template (one
+  manifest). Authored once per repo by the
   [capsule-init skill](capsule/skills/capsule-init) from whatever agent you use: it
   proposes each value from the repo's compose config / Dockerfile / routes and
   you confirm or change every one before anything is written. The CLI never
@@ -16,8 +16,8 @@ POC: turn a Sentry incident into a locally runnable reproduction (see [PLAN.md](
   under `lib/` (repo paths + .env, Sentry API + evidence, manifest + docker
   stack, the capsule record on disk). `capsule repro <sentry-issue-url>` pulls
   the event, writes `capsules/<id>/` (evidence.json, repro.sh, seed.dump,
-  .capsule-recipe/, .env.capsule), boots an **isolated per-bug stack** (own
-  compose project + port, separate from your dev stack), and replays the
+  .capsule-recipe/), boots the repo's compose file as project `capsule-<id>`
+  (own volumes, same ports — stop your dev stack first), and replays the
   failing request. `docker compose -p capsule-<id> exec app bash` to poke
   around inside; `... down` to tear down.
 

@@ -1,9 +1,0 @@
-# Compose overlay owned by capsule. Instantiated per stack as:
-#   docker compose -p capsule-<id> -f compose.yaml -f .capsule/overlay.yaml build app && ... up -d --no-build
-services:
-  app:
-    image: ${CAPSULE_IMAGE}        # tag capsule picks per stack
-    build:
-      context: ${CAPSULE_SRC_ROOT} # the tree being built: this repo, or a fix worktree
-    ports: !override
-      - "${CAPSULE_PORT}:3002"     # per-stack host port → parallel capsules don't collide

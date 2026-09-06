@@ -1,5 +1,9 @@
 // The .capsule/ template (manifest) and everything docker: build the image,
 // boot an isolated compose stack, restore state, verify health.
+//
+// Compose runs the repo's own compose file, unmodified, under a capsule-owned
+// project name (so volumes never mix with the dev stack's). Ports are the
+// repo's ports: shut the dev stack down before running capsule.
 import { existsSync, statSync } from "node:fs";
 import path from "node:path";
 import { $ } from "bun";
@@ -9,13 +13,11 @@ export interface Manifest {
   capsule: number;
   app: string;
   // How the app image is produced. "compose" = `docker compose build <service>`
-  // using the service's own build: block (context redirected to CAPSULE_SRC_ROOT
-  // by the overlay). The only mode for now.
+  // using the service's own build: block. The only mode for now.
   build: "compose";
   run: {
     compose: string;
     service: string;
-    port: number;
     healthcheck: string;
     ready_timeout?: number;
   };
@@ -44,14 +46,6 @@ export async function readManifest(file: string): Promise<Manifest | null> {
 export const loadManifest = (appDir: string) =>
   readManifest(path.join(appDir, ".capsule", "manifest.yaml"));
 
-export function freePort(): number {
-  const srv = Bun.serve({ port: 0, fetch: () => new Response("") });
-  const port = srv.port;
-  srv.stop(true);
-  if (!port) fail("could not allocate a free host port");
-  return port;
-}
-
 // Find a compose-managed container without knowing its stack's compose files.
 export async function containerId(project: string, service: string): Promise<string | null> {
   const ps =
@@ -61,9 +55,24 @@ export async function containerId(project: string, service: string): Promise<str
   return ps.stdout.toString().trim().split("\n")[0] || null;
 }
 
-// Build the app image with `docker compose build <service>`. The overlay
-// points the service's build context at CAPSULE_SRC_ROOT and its image at
-// CAPSULE_IMAGE, both read from the env file already in `flags`.
+// The compose invocation for one app tree under one project name: the repo's
+// compose file plus its .env (compose interpolates from the cwd's .env only).
+export function stackFlags(appDir: string, m: Manifest, project: string): string[] {
+  const env = path.join(appDir, ".env");
+  return ["-p", project, "-f", path.join(appDir, m.run.compose), ...(existsSync(env) ? ["--env-file", env] : [])];
+}
+
+// The host port the app service publishes, as compose resolves it.
+export async function publishedPort(cwd: string, flags: string[], m: Manifest): Promise<number> {
+  const r = await $`docker compose ${flags} config --format json`.cwd(cwd).quiet().nothrow();
+  if (r.exitCode !== 0) throw new Error(`docker compose config failed\n${r.stderr.toString().slice(-2000)}`);
+  const svc = JSON.parse(r.stdout.toString()).services?.[m.run.service];
+  if (!svc) throw new Error(`service "${m.run.service}" not in ${m.run.compose}`);
+  const port = Number(svc.ports?.[0]?.published);
+  if (!port) throw new Error(`service "${m.run.service}" publishes no host port in ${m.run.compose}`);
+  return port;
+}
+
 export async function buildImage(cwd: string, flags: string[], m: Manifest): Promise<void> {
   if (m.build !== "compose") throw new Error(`unsupported manifest build mode: ${JSON.stringify(m.build)}`);
   console.log(`→ building app image: docker compose build ${m.run.service}`);
@@ -71,20 +80,6 @@ export async function buildImage(cwd: string, flags: string[], m: Manifest): Pro
   if (build.exitCode !== 0) {
     throw new Error(`docker compose build failed (exit ${build.exitCode})\n${build.stderr.toString().slice(-2000)}`);
   }
-}
-
-// The per-stack env file: pins the image tag, host port and source tree the
-// overlay interpolates. Everything compose needs to build and boot this stack.
-export const writeStackEnv = (envFile: string, image: string, port: number, srcRoot: string) =>
-  Bun.write(envFile, `CAPSULE_IMAGE=${image}\nCAPSULE_PORT=${port}\nCAPSULE_SRC_ROOT=${srcRoot}\n`);
-
-export function composeFlags(project: string, files: string[], envFiles: string[]): string[] {
-  return [
-    "-p",
-    project,
-    ...files.flatMap((f) => ["-f", f]),
-    ...envFiles.filter(existsSync).flatMap((f) => ["--env-file", f]),
-  ];
 }
 
 export async function pollHealth(target: string, m: Manifest): Promise<boolean> {
@@ -109,15 +104,19 @@ export async function bootStack(
   m: Manifest,
   project: string,
   port: number,
-  seedFile: string,
+  seedFile: string | null,
 ): Promise<string> {
   const run = async (what: string, args: string[]) => {
     const r = await $`docker compose ${flags} ${args}`.cwd(cwd).nothrow();
     if (r.exitCode !== 0) {
-      throw new Error(`${what} failed (exit ${r.exitCode})\n${r.stderr.toString().slice(-2000)}`);
+      const err = r.stderr.toString();
+      const hint = /port is already allocated/.test(err)
+        ? `\nport ${port} is taken — capsule uses the repo's own ports; stop the dev stack (docker compose stop) and retry`
+        : "";
+      throw new Error(`${what} failed (exit ${r.exitCode})${hint}\n${err.slice(-2000)}`);
     }
   };
-  if (m.state?.service && existsSync(seedFile)) {
+  if (m.state?.service && seedFile && existsSync(seedFile)) {
     console.log(`→ restoring state snapshot into ${m.state.service} (${statSync(seedFile).size} bytes)`);
     await run(`docker compose up ${m.state.service}`, ["up", "-d", "--wait", "--no-build", m.state.service]);
     const cid = await containerId(project, m.state.service);
@@ -129,7 +128,7 @@ export async function bootStack(
     }
   }
   console.log(`→ starting stack ${project} (host port ${port})`);
-  // --no-build: the image was built (and tagged) explicitly; never rebuild at up-time.
+  // --no-build: the image was built explicitly above; never rebuild at up-time.
   await run(`docker compose up for ${project}`, ["up", "-d", "--wait", "--no-build"]);
   const target = `http://localhost:${port}`;
   if (await pollHealth(target, m)) return target;
@@ -139,27 +138,13 @@ export async function bootStack(
   );
 }
 
-// Instantiate the app's .capsule/ template as an isolated stack: pin a tag +
-// host port + source tree in envFile, build the image, boot with the overlay.
-export async function instantiate(
-  appDir: string,
-  m: Manifest,
-  project: string,
-  port: number,
-  envFile: string,
-): Promise<string> {
-  const sha = (await $`git -C ${appDir} rev-parse --short HEAD`.quiet().nothrow()).stdout.toString().trim() || "local";
-  await writeStackEnv(envFile, `capsule/${m.app}:${sha}`, port, appDir);
-  const flags = templateFlags(appDir, m, project, envFile);
+// Build + boot an app tree as compose project `project`. Returns the app URL.
+export async function instantiate(appDir: string, m: Manifest, project: string, seedFile: string | null): Promise<string> {
+  const flags = stackFlags(appDir, m, project);
   await buildImage(appDir, flags, m);
-  return bootStack(appDir, flags, m, project, port, path.join(path.dirname(envFile), "seed.dump"));
+  const port = await publishedPort(appDir, flags, m);
+  return bootStack(appDir, flags, m, project, port, seedFile);
 }
-const templateFlags = (appDir: string, m: Manifest, project: string, envFile: string) =>
-  composeFlags(
-    project,
-    [path.join(appDir, m.run.compose), path.join(appDir, ".capsule", "overlay.yaml")],
-    [path.join(appDir, ".env"), envFile],
-  );
 
 // The objective gate for `capsule init`: the template counts only if we can
 // build the image, boot the stack, and get a 2xx healthcheck. Always tears
@@ -168,18 +153,13 @@ export async function verifyTemplate(appDir: string): Promise<{ ok: boolean; log
   const m = await loadManifest(appDir);
   if (!m) return { ok: false, log: ".capsule/manifest.yaml is missing" };
   const project = "capsule-verify";
-  const envFile = path.join(appDir, ".capsule", ".env.verify");
   try {
-    const target = await instantiate(appDir, m, project, freePort(), envFile);
+    const target = await instantiate(appDir, m, project, null);
     return { ok: true, log: `app healthy at ${target}${m.run.healthcheck}` };
   } catch (e) {
     return { ok: false, log: e instanceof Error ? e.message : String(e) };
   } finally {
-    await $`docker compose ${templateFlags(appDir, m, project, envFile)} down -v --remove-orphans`
-      .cwd(appDir)
-      .quiet()
-      .nothrow();
-    await $`rm -f ${envFile}`.quiet().nothrow();
+    await $`docker compose ${stackFlags(appDir, m, project)} down -v --remove-orphans`.cwd(appDir).quiet().nothrow();
   }
 }
 

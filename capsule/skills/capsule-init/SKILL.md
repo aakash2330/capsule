@@ -30,15 +30,13 @@ Show the proposed value, where it came from, and alternatives. Enter/yes keeps i
 |---|---|
 | compose file | the repo's compose file; several → list them |
 | app service (the one sending events to Sentry) | the service with a `build:` block; several → list them |
-| Dockerfile + context | that service's build block, else `Dockerfile` at root |
-| container port | service `ports`/`expose`, else `EXPOSE` in the Dockerfile |
 | healthcheck path | compose healthcheck URL, else a `/health`-style GET route, else `/`. Never add routes |
 | database snapshot | a postgres service (user/db from `POSTGRES_USER`/`POSTGRES_DB`, default `postgres`); "none" if bugs don't need data |
 
 No compose file or Dockerfile? Draft a minimal one under `.capsule/` (app +
 its real deps, with healthchecks), confirm it the same way, and point at it.
 
-## 3. Write two files
+## 3. Write one file
 
 `.capsule/manifest.yaml`
 ```yaml
@@ -48,27 +46,14 @@ build: compose     # docker compose build <service>, using the service's own bui
 run:
   compose: <compose file>
   service: <app service>
-  port: <container port>
   healthcheck: <path>
   ready_timeout: 60
-env: {}
 state: {}          # or: {engine: postgres, service, database, user, source_project: <dev compose project name>}
 ```
 
-`.capsule/overlay.yaml`
-```yaml
-services:
-  <app service>:
-    image: ${CAPSULE_IMAGE}        # tag capsule picks per stack
-    build:
-      context: ${CAPSULE_SRC_ROOT} # the tree capsule is building (repo, or a fix worktree)
-    ports: !override
-      - "${CAPSULE_PORT}:<container port>"
-```
-If the service's `build:` names a `dockerfile`, keep it: it resolves relative
-to the new context. `capsule` runs `compose build <service>` then
-`compose up --no-build`; nothing else in the repo's compose file changes.
-
+Compose runs the repo's compose file unmodified, under project `capsule-<id>`,
+on the repo's own ports. Tell the user: stop the dev stack before `capsule init`,
+`capsule repro`, or `capsule test`.
 
 ## 4. Verify
 
