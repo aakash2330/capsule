@@ -5,17 +5,21 @@ POC: turn a Sentry incident into a locally runnable reproduction (see [PLAN.md](
 - [demo-app/](demo-app) — the target app: Express (on Bun) + Postgres via docker compose.
   `POST /signup` has a deliberate bug that reports to Sentry.
 - [demo-app/.capsule/](demo-app/.capsule) — the environment template (manifest +
-  compose overlay + build script). Authored once per repo by `capsule init`
-  (Claude Code mines the repo's compose/Dockerfile/CI and writes the template;
-  the CLI machine-verifies it: build → boot → 2xx healthcheck, retrying with the
-  failure log up to 3×). Per-bug environments are instantiated from it mechanically.
-  `capsule init` on a repo that already has a template just re-verifies it.
-- [capsule/](capsule) — the CLI. `capsule repro <sentry-issue-url>` pulls the event,
-  writes `capsules/<id>/` (evidence.json, repro.sh, CONTEXT.md, .env.capsule),
-  builds the app image, boots an **isolated per-bug stack** (own compose project +
-  port, separate from your dev stack), and replays the failing request. Fix the code,
-  rerun the same command: it rebuilds and re-verifies. `docker compose -p
-  capsule-<id> exec app bash` to poke around inside; `... down` to tear down.
+  compose overlay). Authored once per repo by the
+  [capsule-init skill](capsule/skills/capsule-init) from whatever agent you use: it
+  proposes each value from the repo's compose config / Dockerfile / routes and
+  you confirm or change every one before anything is written. The CLI never
+  authors it and never calls an AI; `capsule init` judges it (build → boot →
+  2xx healthcheck) and is re-run after any fix. Per-bug environments are instantiated from it mechanically.
+- [capsule/](capsule) — the CLI. `capsule.ts` is the entry (usage + dispatch);
+  one file per command under `cmd/` (init, repro, test, claude); shared pieces
+  under `lib/` (repo paths + .env, Sentry API + evidence, manifest + docker
+  stack, the capsule record on disk). `capsule repro <sentry-issue-url>` pulls
+  the event, writes `capsules/<id>/` (evidence.json, repro.sh, seed.dump,
+  .capsule-recipe/, .env.capsule), boots an **isolated per-bug stack** (own
+  compose project + port, separate from your dev stack), and replays the
+  failing request. `docker compose -p capsule-<id> exec app bash` to poke
+  around inside; `... down` to tear down.
 
 ## Setup (once)
 
@@ -43,14 +47,10 @@ capsule repro <sentry-issue-url>              # reproduce it locally
 ## The fix loop
 
 ```sh
-capsule create <issue-url>    # evidence + isolated stack built & booted (no replay)
-capsule run <issue-id>          # fire the captured trigger — confirm the bug is present
-                              # (capsule repro <issue-url> = create + run in one shot)
+capsule repro <issue-url>     # evidence + isolated stack booted + trigger replayed: bug confirmed present
 # ...fix the code in your editor...
-capsule apply <issue-id>        # rebuild image from your tree, swap ONLY the app —
-                              # DB/state untouched, distinct image tag recorded
-capsule test [issue-id]         # replay EVERY capsule's trigger (regression pack):
-                              # your bug should flip to ✓, all past bugs must stay ✓
+capsule test <issue-id>       # rebuild from your tree, reset the world, replay → PASS/FAIL + signed receipt
+capsule test                  # regression pack: every past bug must stay fixed
 docker compose -p capsule-<id> down       # when you're done
 ```
 

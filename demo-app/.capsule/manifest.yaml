@@ -1,20 +1,12 @@
 # Capsule environment template — authored once, instantiated per bug.
-# The overlay references the repo's own compose.yaml; it never copies it.
 capsule: 1
 app: demo-app
-
-build:
-  image: capsule/demo-app        # tagged by build.sh
-  dockerfile: Dockerfile         # the repo's own — referenced, not copied
-
+build: compose                   # docker compose build app, using compose.yaml's own build: block
 run:
   compose: compose.yaml          # base layer (the repo's own compose file)
   service: app
   port: 3002                     # container port
-  healthcheck: /health           # 200 within ready_timeout = booted
+  healthcheck: /health           # 2xx within ready_timeout = booted
   ready_timeout: 60
-
-env:
-  SENTRY_DSN: passthrough        # v0: replays report to real Sentry (DSN sink comes later)
-
-state: {}                        # v0: no seed hooks — this app's bug needs no seeded state
+env: {}
+state: {}

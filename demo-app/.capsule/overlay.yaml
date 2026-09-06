@@ -1,9 +1,9 @@
-# Compose overlay owned by capsule. Instantiated per bug as:
-#   docker compose -p capsule-<id> -f compose.yaml -f .capsule/overlay.yaml up -d
-# Only capsule-specific changes live here; services/deps inherit from compose.yaml.
+# Compose overlay owned by capsule. Instantiated per stack as:
+#   docker compose -p capsule-<id> -f compose.yaml -f .capsule/overlay.yaml build app && ... up -d --no-build
 services:
   app:
-    image: ${CAPSULE_IMAGE}      # pinned image built by build.sh
-    build: !reset null           # never rebuild from the working tree at up-time
+    image: ${CAPSULE_IMAGE}        # tag capsule picks per stack
+    build:
+      context: ${CAPSULE_SRC_ROOT} # the tree being built: this repo, or a fix worktree
     ports: !override
-      - "${CAPSULE_PORT}:3002"   # per-bug host port → parallel capsules don't collide
+      - "${CAPSULE_PORT}:3002"     # per-stack host port → parallel capsules don't collide
