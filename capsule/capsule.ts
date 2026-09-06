@@ -11,8 +11,9 @@ function usage(): never {
   console.log(`capsule — reproduce a Sentry issue locally (run inside the app repo)
 
   capsule init                       onboarding: confirms the Sentry vars in the app's
-                                     .env (adds missing ones), then verifies the .capsule/
-                                     template (build → boot → healthcheck). Author .capsule/
+                                     .env (adds missing ones), then validates the .capsule/
+                                     manifest against the compose file (nothing is built
+                                     or run). Author .capsule/
                                      with the capsule-init skill first. Re-run any time.
   capsule repro <sentry-issue-url>   fetch evidence, snapshot the dev DB, boot an isolated
                                      stack, replay the trigger; exit 0 = bug reproduced

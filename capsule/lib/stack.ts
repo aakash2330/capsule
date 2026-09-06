@@ -146,21 +146,35 @@ export async function instantiate(appDir: string, m: Manifest, project: string, 
   return bootStack(appDir, flags, m, project, port, seedFile);
 }
 
-// The objective gate for `capsule init`: the template counts only if we can
-// build the image, boot the stack, and get a 2xx healthcheck. Always tears
-// the verification stack down.
-export async function verifyTemplate(appDir: string): Promise<{ ok: boolean; log: string }> {
-  const m = await loadManifest(appDir);
+// The gate for `capsule init`: static validation only, nothing is built or
+// booted. Manifest parses, the compose file exists, the service is in it with
+// a build: block and a published port, the healthcheck is a path.
+export async function validateTemplate(appDir: string): Promise<{ ok: boolean; log: string }> {
+  const m = await loadManifest(appDir).catch((e) => {
+    throw new Error(`.capsule/manifest.yaml does not parse: ${e instanceof Error ? e.message : e}`);
+  });
   if (!m) return { ok: false, log: ".capsule/manifest.yaml is missing" };
-  const project = "capsule-verify";
-  try {
-    const target = await instantiate(appDir, m, project, null);
-    return { ok: true, log: `app healthy at ${target}${m.run.healthcheck}` };
-  } catch (e) {
-    return { ok: false, log: e instanceof Error ? e.message : String(e) };
-  } finally {
-    await $`docker compose ${stackFlags(appDir, m, project)} down -v --remove-orphans`.cwd(appDir).quiet().nothrow();
-  }
+  const problems: string[] = [];
+  if (m.build !== "compose") problems.push(`build: must be "compose" (got ${JSON.stringify(m.build)})`);
+  if (!m.run?.compose) problems.push("run.compose is missing");
+  else if (!existsSync(path.join(appDir, m.run.compose))) problems.push(`run.compose: ${m.run.compose} not found`);
+  if (!m.run?.service) problems.push("run.service is missing");
+  if (!m.run?.healthcheck?.startsWith("/")) problems.push(`run.healthcheck must be a path like /health (got ${JSON.stringify(m.run?.healthcheck)})`);
+  if (m.state?.service && !(m.state.database && m.state.user)) problems.push("state: service set but database/user missing");
+  if (problems.length) return { ok: false, log: problems.join("\n  ") };
+
+  const flags = stackFlags(appDir, m, "capsule-validate");
+  const r = await $`docker compose ${flags} config --format json`.cwd(appDir).quiet().nothrow();
+  if (r.exitCode !== 0) return { ok: false, log: `docker compose config failed\n${r.stderr.toString().slice(-1500)}` };
+  const services = JSON.parse(r.stdout.toString()).services ?? {};
+  const svc = services[m.run.service];
+  if (!svc) return { ok: false, log: `run.service: "${m.run.service}" not in ${m.run.compose} (has: ${Object.keys(services).join(", ")})` };
+  if (!svc.build) problems.push(`service "${m.run.service}" has no build: block — capsule builds with docker compose build`);
+  const port = Number(svc.ports?.[0]?.published);
+  if (!port) problems.push(`service "${m.run.service}" publishes no host port`);
+  if (m.state?.service && !services[m.state.service]) problems.push(`state.service: "${m.state.service}" not in ${m.run.compose}`);
+  if (problems.length) return { ok: false, log: problems.join("\n  ") };
+  return { ok: true, log: `${m.run.compose} → service ${m.run.service} builds and publishes :${port}; healthcheck ${m.run.healthcheck}` };
 }
 
 // World capture: pg_dump the live dev stack's DB into the capsule. Failure is

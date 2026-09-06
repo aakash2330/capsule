@@ -6,7 +6,7 @@ description: Set up capsule in a repo. Use when the user asks to onboard, init, 
 # capsule-init
 
 You author `.capsule/` for this repo. The CLI never guesses; you propose, the
-user confirms, `capsule init` judges. Ask with your question tool if you have
+user confirms, `capsule init` validates. Ask with your question tool if you have
 one, otherwise in chat. Write nothing until every decision below is confirmed.
 
 ## 0. Start clean
@@ -58,7 +58,7 @@ on the repo's own ports. Tell the user: stop the dev stack before `capsule init`
 ## 4. Verify
 
 ```bash
-capsule init         # confirms SENTRY_AUTH_TOKEN/SENTRY_ORG in the app's .env, then build → boot → 2xx healthcheck
+capsule init         # confirms SENTRY_AUTH_TOKEN/SENTRY_ORG in the app's .env, then validates the manifest against the compose file (nothing is built or run)
 ```
 On failure: read the log it prints, propose the fix, confirm, apply, re-run `capsule init`.
 Only edit inside `.capsule/` unless the user says otherwise.

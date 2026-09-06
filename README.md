@@ -9,8 +9,8 @@ POC: turn a Sentry incident into a locally runnable reproduction (see [PLAN.md](
   [capsule-init skill](capsule/skills/capsule-init) from whatever agent you use: it
   proposes each value from the repo's compose config / Dockerfile / routes and
   you confirm or change every one before anything is written. The CLI never
-  authors it and never calls an AI; `capsule init` judges it (build → boot →
-  2xx healthcheck) and is re-run after any fix. Per-bug environments are instantiated from it mechanically.
+  authors it and never calls an AI; `capsule init` validates it against the
+  compose file (nothing is built or run) and is re-run after any fix. Per-bug environments are instantiated from it mechanically.
 - [capsule/](capsule) — the CLI. `capsule.ts` is the entry (usage + dispatch);
   one file per command under `cmd/` (init, repro, test, claude); shared pieces
   under `lib/` (repo paths + .env, Sentry API + evidence, manifest + docker
