@@ -55,10 +55,14 @@ Compose runs the repo's compose file unmodified, under project `capsule-<id>`,
 on the repo's own ports. Tell the user: stop the dev stack before `capsule init`,
 `capsule repro`, or `capsule test`.
 
-## 4. Verify
+## 4. Hand off — never run `capsule init` yourself
 
-```bash
-capsule init         # confirms SENTRY_AUTH_TOKEN/SENTRY_ORG in the app's .env, then validates the manifest against the compose file (nothing is built or run)
-```
-On failure: read the log it prints, propose the fix, confirm, apply, re-run `capsule init`.
-Only edit inside `.capsule/` unless the user says otherwise.
+It prompts for a Sentry auth token. The user runs it in their own terminal so
+the secret goes to a local script, not into the chat. Never ask for the token.
+
+Tell the user: "`.capsule/manifest.yaml` is written. Run `capsule init` in the
+repo. It confirms SENTRY_AUTH_TOKEN / SENTRY_ORG in .env (token read hidden,
+stays on your machine) and validates the manifest. Nothing is built or run."
+
+If they report a validation error: propose the fix, confirm, apply, ask them
+to re-run. Only edit inside `.capsule/` unless the user says otherwise.
