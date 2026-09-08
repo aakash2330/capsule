@@ -1,0 +1,19 @@
+# Capsule environment template, hand-written per repo. The Solari sandbox runs
+# these as plain commands: no Docker inside the microVM (its kernel has no
+# overlayfs, netfilter, or cgroup BPF, so containers cannot start).
+capsule: 1
+app: demo-project
+sandbox:
+  install:
+    - apt-get update -qq
+    - DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql unzip
+    - curl -fsSL https://bun.sh/install | bash
+  seed:
+    - service postgresql start
+    - su postgres -c "psql -c \"alter user postgres password 'postgres'\""
+    - su postgres -c "psql -f db/init.sql"
+  start: /root/.bun/bin/bun server.ts
+  port: 3002
+  health: /health
+env:
+  POSTGRES_URL: postgres://postgres:postgres@localhost:5432/postgres

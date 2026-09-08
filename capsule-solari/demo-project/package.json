@@ -1,0 +1,17 @@
+{
+  "name": "capsule-demo-app",
+  "version": "0.0.1",
+  "private": true,
+  "scripts": {
+    "start": "bun server.ts"
+  },
+  "dependencies": {
+    "@sentry/bun": "^10.65.0",
+    "express": "^5.2.1"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.14",
+    "@types/express": "^5.0.6",
+    "typescript": "^7.0.2"
+  }
+}
