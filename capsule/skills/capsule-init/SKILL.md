@@ -19,6 +19,7 @@ start from scratch?" Yes → delete `.capsule/`. No → stop.
 ```bash
 docker compose config --format json     # services, build, ports, healthchecks, env
 ```
+
 Also read the Dockerfile(s) and grep GET routes. Never invent services the
 app doesn't use.
 
@@ -26,12 +27,12 @@ app doesn't use.
 
 Show the proposed value, where it came from, and alternatives. Enter/yes keeps it.
 
-| decision | propose from |
-|---|---|
-| compose file | the repo's compose file; several → list them |
-| app service (the one sending events to Sentry) | the service with a `build:` block; several → list them |
-| healthcheck path | compose healthcheck URL, else a `/health`-style GET route, else `/`. Never add routes |
-| database snapshot | a postgres service (user/db from `POSTGRES_USER`/`POSTGRES_DB`, default `postgres`); "none" if bugs don't need data |
+| decision                                       | propose from                                                                                                        |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| compose file                                   | the repo's compose file; several → list them                                                                        |
+| app service (the one sending events to Sentry) | the service with a `build:` block; several → list them                                                              |
+| healthcheck path                               | compose healthcheck URL, else a `/health`-style GET route, else `/`. Never add routes                               |
+| database snapshot                              | a postgres service (user/db from `POSTGRES_USER`/`POSTGRES_DB`, default `postgres`); "none" if bugs don't need data |
 
 No compose file or Dockerfile? Draft a minimal one under `.capsule/` (app +
 its real deps, with healthchecks), confirm it the same way, and point at it.
@@ -39,16 +40,17 @@ its real deps, with healthchecks), confirm it the same way, and point at it.
 ## 3. Write one file
 
 `.capsule/manifest.yaml`
+
 ```yaml
 capsule: 1
 app: <app>
-build: compose     # docker compose build <service>, using the service's own build: block
+build: compose # docker compose build <service>, using the service's own build: block
 run:
   compose: <compose file>
   service: <app service>
   healthcheck: <path>
   ready_timeout: 60
-state: {}          # or: {engine: postgres, service, database, user, source_project: <dev compose project name>}
+state: {} # or: {engine: postgres, service, database, user, source_project: <dev compose project name>}
 ```
 
 Compose runs the repo's compose file unmodified, under project `capsule-<id>`,

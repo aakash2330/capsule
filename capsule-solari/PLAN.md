@@ -28,24 +28,49 @@ Lives at `applications/capsule/` in our fork of the cookbook. One folder. A stra
 ### Commands
 
 ```
-capsule sync                       pull unresolved Sentry issues above a level, build one frozen
-                                   machine per new issue, print reproduced / did not fire / no request
-capsule shell <issue>              fork the snapshot, drop into a terminal on the failing machine (PTY)
-capsule replay <issue> [--patch]   fork, apply the patch if given, fire the original request from a
-                                   separate Solari browser, check the row exists, print pass or fail
-capsule gc                         list every sandbox tagged with this run id and kill it
+capsule reprocreate <sentry-url | event.json>   build one frozen machine with the bug firing, print the snapshot id
+capsule reprorun <issue>                       fork the snapshot, drop into a terminal on the failing machine (PTY)
+capsule reprotest <issue> [--patch diff]       fork, apply the patch if given, fire the original request from a
+                                               separate Solari browser, check the row exists, print pass or fail
 ```
+
+Three verbs, no more. Forks die on idle timeout, so there is no cleanup verb.
 
 Two ways in, one file in the middle, everything after it identical:
 
 ```
-capsule sync --from ./fixtures/                                  # exported Sentry event JSON, Solari key only
-capsule sync https://sentry.io/organizations/<org>/issues/<id>/  # needs SENTRY_AUTH_TOKEN
+capsule reprocreate ./fixtures/signup-500.json                  # exported Sentry event JSON, Solari key only
+capsule reprocreate https://sentry.io/organizations/<org>/issues/<id>/  # needs SENTRY_AUTH_TOKEN
 ```
 
 `evidence` is the raw Sentry event JSON, exactly what the "JSON" link on any Sentry event page downloads. No custom format. The URL path fetches the same JSON through the API.
 
-### What `sync` does per issue
+### Many reproductions at once
+
+Local capsule runs one reproduction at a time on one laptop. On Solari a user can hold
+ten frozen issues and fork any of them in parallel, so the tool has to answer "which
+machine is this test running on?" without a local state file.
+
+Rule: the issue id is the key for everything, and Solari metadata is the registry.
+
+- Every snapshot is named `capsule-<issue>-<short event hash>`. Every sandbox is created
+  with `metadata: { issue, snapshot, run, purpose }` where purpose is `create`, `run`,
+  or `test`.
+- `reprorun <issue>` and `reprotest <issue>` never take a sandbox or snapshot id. They look
+  up the newest snapshot for that issue and fork it. The wrong environment is not an
+  input the user can pass.
+- A fork checks itself before doing anything: it reads `/app/.capsule/issue` (written by
+  `reprocreate` before the snapshot) and refuses if it does not match the requested issue.
+  One line, catches a mislabelled snapshot.
+- Re-running `reprocreate` on the same issue makes a new snapshot and leaves the old one.
+  `reprotest` picks the newest. Nothing is overwritten.
+- No `ls` or `gc` verb. The Solari console lists snapshots and sandboxes by metadata, and
+  forks kill themselves on idle timeout. Snapshots are only deleted explicitly.
+
+Skipped: a local `.capsule/state.json` mirror. Solari already stores the metadata and
+lists by it, and a second copy on disk is the thing that drifts.
+
+### What `reprocreate` does per issue
 
 1. Create a sandbox from the base template, tagged with `metadata: { capsuleRun: <run id>, issue: <id> }`, `lifecycle: { onTimeout: "kill" }`.
 2. Install Postgres and Bun natively (apt plus a shell command). No Docker inside the sandbox.
@@ -63,7 +88,7 @@ issue    title                          reproduced   snapshot
 12347    GET /orders/:id 500            no           snap_91c0 (booted, did not fire)
 ```
 
-### What `replay` does
+### What `reprotest` does
 
 1. Fork the snapshot once per patch, in parallel.
 2. In each fork: compare the marker hash to the base, apply the patch, restart the app, expose the port with `previewUrl`.
@@ -89,7 +114,7 @@ applications/capsule/
   README.md                 what it proves, how to run, honest limits
   .env.example              SOLARI_API_KEY, SENTRY_AUTH_TOKEN (URL form only)
   package.json              tsx, @solarisdk/sdk, @solarisdk/browser
-  capsule.ts                sync | shell | replay | gc
+  capsule.ts                reprocreate | reprorun | reprotest
   lib/solari.ts             create / snapshot / fork / kill, all tagged with the run id
   lib/sentry.ts             fetch event JSON by URL; parse the request out of an event
   lib/manifest.ts           read demo-app/.capsule/manifest.yaml
@@ -124,14 +149,14 @@ Say in the README that the manifest is hand-written per repo. That sentence keep
 
 ## Out of scope, on purpose
 
-UI, multi-repo, the DSN sink, a long-running watcher (sync is one-shot, cron it), hosted anything, more than three patches, more than three fixtures, an AI that writes fixes. Everything else goes to `capsule.dev/IDEAS.md`.
+UI, multi-repo, the DSN sink, a long-running watcher (reprocreate is one-shot, cron it), hosted anything, more than three patches, more than three fixtures, an AI that writes fixes. Everything else goes to `capsule.dev/IDEAS.md`.
 
 ## Build order
 
 1. **Hour one.** Free key. Prove apt works in the base template and Postgres starts as a plain process. If apt is missing, build a custom template once with their Image builder (`aptInstall`) and start from that. Custom images are marked Beta.
 2. **Record the fixtures.** Add the two extra bugs to demo-app. Run demo-app locally with a DSN, trigger each bug, export each event's JSON, commit to `fixtures/`.
-3. **`sync` end to end on fixture files.** Create, install, upload, seed, start, replay, marker, snapshot. Metadata tagging and `gc`.
-4. **`replay`.** Fork per patch, marker check, patch, preview URL, browser judge, row check, table. Write the three patches.
+3. **`reprocreate` end to end on fixture files.** Fork the base, upload, seed, start, replay, marker, snapshot. Metadata tagging.
+4. **`reprotest`.** Fork per patch, marker check, patch, preview URL, browser judge, row check, table. Write the three patches.
 5. **`shell`** (PTY into a fork). Sentry URL path with fail-fast. Regression pack.
 6. **README, `.env.example`, fresh-clone run** on a wiped directory with a fresh key. Checklist below.
 7. **Ship.** PR to the cookbook under `applications/capsule/`. Post on X and LinkedIn with the two tables. DM James Sng with the PR link. Email Harry Chow.
